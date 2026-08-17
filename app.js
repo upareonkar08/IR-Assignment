@@ -229,22 +229,39 @@
     const caseSensitive = caseSensitiveCheck.checked;
     const wholeWord = wholeWordCheck.checked;
 
-    // Count occurrences in each file
+    const N = state.files.length; // Total number of documents
+
+    // Step 1: Count occurrences and total words in each file
     const results = state.files.map((file) => {
       const count = countOccurrences(file.text, rawKeyword, caseSensitive, wholeWord);
-      return { name: file.name, count };
+      const totalWords = getWordCount(file.text);
+      return { name: file.name, count, totalWords };
     });
 
-    // Filter and sort descending
-    const matched = results.filter((r) => r.count > 0);
-    matched.sort((a, b) => b.count - a.count);
+    // Step 2: Calculate DF (Document Frequency) — how many docs contain the term
+    const df = results.filter((r) => r.count > 0).length;
 
-    if (matched.length === 0) {
+    if (df === 0) {
       resultsSection.classList.add('hidden');
       emptyState.classList.remove('hidden');
       emptyKeyword.textContent = rawKeyword;
       return;
     }
+
+    // Step 3: Calculate IDF = log10(N / df)
+    const idf = Math.log10(N / df);
+
+    // Step 4: Calculate TF and TF-IDF for each file
+    const matched = results
+      .filter((r) => r.count > 0)
+      .map((r) => {
+        const tf = r.totalWords > 0 ? r.count / r.totalWords : 0;
+        const tfidf = tf * idf;
+        return { ...r, tf, idf, tfidf };
+      });
+
+    // Sort by TF-IDF descending
+    matched.sort((a, b) => b.tfidf - a.tfidf);
 
     emptyState.classList.add('hidden');
     resultsSection.classList.remove('hidden');
@@ -253,11 +270,12 @@
     const totalOccurrences = matched.reduce((sum, r) => sum + r.count, 0);
     resultsSummary.innerHTML = `
       Found <strong>${totalOccurrences.toLocaleString()}</strong> occurrence${totalOccurrences !== 1 ? 's' : ''}
-      across <strong>${matched.length}</strong> file${matched.length !== 1 ? 's' : ''}
+      across <strong>${matched.length}</strong> of <strong>${N}</strong> files
+      &nbsp;·&nbsp; IDF = log<sub>10</sub>(${N}/${matched.length}) = <strong>${idf.toFixed(4)}</strong>
     `;
 
     // Render results
-    const maxCount = matched[0].count;
+    const maxTfidf = matched[0].tfidf;
     resultsList.innerHTML = '';
 
     matched.forEach((item, idx) => {
@@ -268,7 +286,7 @@
 
       const basename = item.name.split('/').pop();
       const dirPath = item.name.includes('/') ? item.name.substring(0, item.name.lastIndexOf('/')) : '';
-      const barWidth = Math.max((item.count / maxCount) * 100, 2);
+      const barWidth = maxTfidf > 0 ? Math.max((item.tfidf / maxTfidf) * 100, 2) : 2;
 
       let rankClass = 'rank-default';
       if (rank === 1) rankClass = 'rank-1';
@@ -281,9 +299,30 @@
           <div class="result-filename" title="${escapeHtml(item.name)}">${escapeHtml(basename)}</div>
           ${dirPath ? `<div class="result-path" title="${escapeHtml(dirPath)}">${escapeHtml(dirPath)}</div>` : ''}
         </div>
-        <div class="result-count">
-          <span class="count-number">${item.count.toLocaleString()}</span>
-          <span class="count-label">match${item.count !== 1 ? 'es' : ''}</span>
+        <div class="result-tfidf">
+          <span class="tfidf-score">${item.tfidf.toFixed(4)}</span>
+          <span class="tfidf-label">TF-IDF</span>
+        </div>
+        <div class="result-metrics">
+          <div class="metric">
+            <span class="metric-value">${item.count}</span>
+            <span class="metric-label">Freq</span>
+          </div>
+          <div class="metric-divider"></div>
+          <div class="metric">
+            <span class="metric-value">${item.tf.toFixed(4)}</span>
+            <span class="metric-label">TF</span>
+          </div>
+          <div class="metric-divider"></div>
+          <div class="metric">
+            <span class="metric-value">${item.idf.toFixed(4)}</span>
+            <span class="metric-label">IDF</span>
+          </div>
+          <div class="metric-divider"></div>
+          <div class="metric">
+            <span class="metric-value">${item.totalWords}</span>
+            <span class="metric-label">Words</span>
+          </div>
         </div>
         <div class="result-bar-wrap">
           <div class="result-bar" style="width: ${barWidth}%"></div>
@@ -295,6 +334,12 @@
   }
 
   // --- Helpers ---
+  function getWordCount(text) {
+    if (!text) return 0;
+    // Split by whitespace and filter out empty strings
+    return text.split(/\s+/).filter((w) => w.length > 0).length;
+  }
+
   function countOccurrences(text, keyword, caseSensitive, wholeWord) {
     if (!text || !keyword) return 0;
 
