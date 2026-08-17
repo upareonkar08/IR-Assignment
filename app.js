@@ -231,51 +231,87 @@
 
     const N = state.files.length; // Total number of documents
 
-    // Step 1: Count occurrences and total words in each file
-    const results = state.files.map((file) => {
-      const count = countOccurrences(file.text, rawKeyword, caseSensitive, wholeWord);
-      const totalWords = getWordCount(file.text);
-      return { name: file.name, count, totalWords };
+    // Split query into individual keywords
+    const keywords = rawKeyword.split(/\s+/).filter((k) => k.length > 0);
+
+    // For each keyword, compute per-file TF-IDF
+    const keywordData = keywords.map((kw) => {
+      const perFile = state.files.map((file) => {
+        const count = countOccurrences(file.text, kw, caseSensitive, wholeWord);
+        const totalWords = getWordCount(file.text);
+        const tf = totalWords > 0 ? count / totalWords : 0;
+        return { name: file.name, count, totalWords, tf };
+      });
+
+      const df = perFile.filter((f) => f.count > 0).length;
+      const idf = df > 0 ? Math.log10(N / df) : 0;
+
+      // Attach idf and tfidf to each file entry
+      const withTfidf = perFile.map((f) => ({
+        ...f,
+        idf,
+        tfidf: f.tf * idf,
+      }));
+
+      return { keyword: kw, df, idf, files: withTfidf };
     });
 
-    // Step 2: Calculate DF (Document Frequency) — how many docs contain the term
-    const df = results.filter((r) => r.count > 0).length;
+    // Aggregate: for each file, sum TF-IDF across all keywords
+    const aggregated = state.files.map((file, i) => {
+      let totalTfidf = 0;
+      let totalCount = 0;
+      const totalWords = getWordCount(file.text);
+      const perKeyword = [];
 
-    if (df === 0) {
+      keywordData.forEach((kd) => {
+        const entry = kd.files[i];
+        totalTfidf += entry.tfidf;
+        totalCount += entry.count;
+        perKeyword.push({
+          keyword: kd.keyword,
+          count: entry.count,
+          tf: entry.tf,
+          idf: kd.idf,
+          tfidf: entry.tfidf,
+        });
+      });
+
+      return {
+        name: file.name,
+        totalTfidf,
+        totalCount,
+        totalWords,
+        perKeyword,
+      };
+    });
+
+    // Filter files that have at least one keyword match, sort by total TF-IDF
+    const matched = aggregated.filter((r) => r.totalCount > 0);
+    matched.sort((a, b) => b.totalTfidf - a.totalTfidf);
+
+    if (matched.length === 0) {
       resultsSection.classList.add('hidden');
       emptyState.classList.remove('hidden');
       emptyKeyword.textContent = rawKeyword;
       return;
     }
 
-    // Step 3: Calculate IDF = log10(N / df)
-    const idf = Math.log10(N / df);
-
-    // Step 4: Calculate TF and TF-IDF for each file
-    const matched = results
-      .filter((r) => r.count > 0)
-      .map((r) => {
-        const tf = r.totalWords > 0 ? r.count / r.totalWords : 0;
-        const tfidf = tf * idf;
-        return { ...r, tf, idf, tfidf };
-      });
-
-    // Sort by TF-IDF descending
-    matched.sort((a, b) => b.tfidf - a.tfidf);
-
     emptyState.classList.add('hidden');
     resultsSection.classList.remove('hidden');
 
     // Summary
-    const totalOccurrences = matched.reduce((sum, r) => sum + r.count, 0);
+    const totalOccurrences = matched.reduce((sum, r) => sum + r.totalCount, 0);
+    const keywordSummaryParts = keywordData.map((kd) =>
+      `<span class="kw-chip">${escapeHtml(kd.keyword)} <small>IDF=${kd.idf.toFixed(3)}</small></span>`
+    );
     resultsSummary.innerHTML = `
       Found <strong>${totalOccurrences.toLocaleString()}</strong> occurrence${totalOccurrences !== 1 ? 's' : ''}
       across <strong>${matched.length}</strong> of <strong>${N}</strong> files
-      &nbsp;·&nbsp; IDF = log<sub>10</sub>(${N}/${matched.length}) = <strong>${idf.toFixed(4)}</strong>
+      &nbsp;·&nbsp; ${keywordSummaryParts.join(' ')}
     `;
 
     // Render results
-    const maxTfidf = matched[0].tfidf;
+    const maxTfidf = matched[0].totalTfidf;
     resultsList.innerHTML = '';
 
     matched.forEach((item, idx) => {
@@ -286,12 +322,23 @@
 
       const basename = item.name.split('/').pop();
       const dirPath = item.name.includes('/') ? item.name.substring(0, item.name.lastIndexOf('/')) : '';
-      const barWidth = maxTfidf > 0 ? Math.max((item.tfidf / maxTfidf) * 100, 2) : 2;
+      const barWidth = maxTfidf > 0 ? Math.max((item.totalTfidf / maxTfidf) * 100, 2) : 2;
 
       let rankClass = 'rank-default';
       if (rank === 1) rankClass = 'rank-1';
       else if (rank === 2) rankClass = 'rank-2';
       else if (rank === 3) rankClass = 'rank-3';
+
+      // Build per-keyword breakdown rows
+      const kwBreakdownHtml = item.perKeyword.map((pk) => `
+        <div class="kw-row">
+          <span class="kw-name">${escapeHtml(pk.keyword)}</span>
+          <span class="kw-detail">Freq: <strong>${pk.count}</strong></span>
+          <span class="kw-detail">TF: <strong>${pk.tf.toFixed(4)}</strong></span>
+          <span class="kw-detail">IDF: <strong>${pk.idf.toFixed(4)}</strong></span>
+          <span class="kw-detail kw-tfidf">TF-IDF: <strong>${pk.tfidf.toFixed(4)}</strong></span>
+        </div>
+      `).join('');
 
       row.innerHTML = `
         <div class="result-rank ${rankClass}">${rank}</div>
@@ -300,30 +347,43 @@
           ${dirPath ? `<div class="result-path" title="${escapeHtml(dirPath)}">${escapeHtml(dirPath)}</div>` : ''}
         </div>
         <div class="result-tfidf">
-          <span class="tfidf-score">${item.tfidf.toFixed(4)}</span>
-          <span class="tfidf-label">TF-IDF</span>
+          <span class="tfidf-score">${item.totalTfidf.toFixed(4)}</span>
+          <span class="tfidf-label">${keywords.length > 1 ? 'Σ TF-IDF' : 'TF-IDF'}</span>
         </div>
         <div class="result-metrics">
           <div class="metric">
-            <span class="metric-value">${item.count}</span>
-            <span class="metric-label">Freq</span>
-          </div>
-          <div class="metric-divider"></div>
-          <div class="metric">
-            <span class="metric-value">${item.tf.toFixed(4)}</span>
-            <span class="metric-label">TF</span>
-          </div>
-          <div class="metric-divider"></div>
-          <div class="metric">
-            <span class="metric-value">${item.idf.toFixed(4)}</span>
-            <span class="metric-label">IDF</span>
+            <span class="metric-value">${item.totalCount}</span>
+            <span class="metric-label">Total Freq</span>
           </div>
           <div class="metric-divider"></div>
           <div class="metric">
             <span class="metric-value">${item.totalWords}</span>
             <span class="metric-label">Words</span>
           </div>
+          <div class="metric-divider"></div>
+          <div class="metric">
+            <span class="metric-value">${keywords.length}</span>
+            <span class="metric-label">Keywords</span>
+          </div>
         </div>
+        ${keywords.length > 1 ? `<div class="kw-breakdown">${kwBreakdownHtml}</div>` : `
+        <div class="result-metrics">
+          <div class="metric">
+            <span class="metric-value">${item.perKeyword[0].tf.toFixed(4)}</span>
+            <span class="metric-label">TF</span>
+          </div>
+          <div class="metric-divider"></div>
+          <div class="metric">
+            <span class="metric-value">${item.perKeyword[0].idf.toFixed(4)}</span>
+            <span class="metric-label">IDF</span>
+          </div>
+          <div class="metric-divider"></div>
+          <div class="metric">
+            <span class="metric-value">${item.perKeyword[0].count}</span>
+            <span class="metric-label">Freq</span>
+          </div>
+        </div>
+        `}
         <div class="result-bar-wrap">
           <div class="result-bar" style="width: ${barWidth}%"></div>
         </div>
